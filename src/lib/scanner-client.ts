@@ -5,6 +5,11 @@ async function sendMessageToBackground<T = any>(message: any): Promise<T> {
   try {
     const response = await browser.runtime.sendMessage(message);
     if (response?.success === false) { 
+      // Propagate cancellation errors without logging them as unexpected
+      if (response.error === 'Scan cancelled') {
+        return { success: false, error: 'Scan cancelled' } as T;
+      }
+      console.error(`Background script error for ${message.type}:`, response.error);
       return response;
     }
     return response;
@@ -16,15 +21,15 @@ async function sendMessageToBackground<T = any>(message: any): Promise<T> {
 
 async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Finding[]> {
   const findings: Finding[] = [];
-  const fullUrl = `https://${domain}`;
   const checks = JSON.parse(JSON.stringify(wordlist.endpoints));
   const seenFindings = new Set<string>();
 
   for (const check of checks) {
       try {
-        const response = await sendMessageToBackground<{ success: boolean, status: number, finalUrl: string }>({
+        const response = await sendMessageToBackground<{ success: boolean, status: number }>({
             type: 'CHECK_URL',
-            url: `${fullUrl}${check.path}`
+            url: `https://${domain}${check.path}`,
+            domain: domain, // Pass domain for cancellation check
         });
 
         if (response && response.success && response.status === 200) {
@@ -42,6 +47,7 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
               });
             }
         }
+        // If response.success is false, we just skip this path and continue.
       } catch (error) {
         console.warn(`Skipping path ${check.path} for domain ${domain} due to error:`, error);
       }
@@ -98,7 +104,7 @@ export async function performScan(input: {
   wordlist: Wordlist;
 }): Promise<ScanOutput> {
   const rootDomain = getRootDomain(input.domain);
-  const collectedDomains = new Set<string>();
+  const collectedSubdomains = new Set<string>();
   let rawData: any = null;
 
   if (input.apiKey) {
@@ -106,7 +112,8 @@ export async function performScan(input: {
       const response = await sendMessageToBackground<{ success: boolean, data: any, error?: string }>({
         type: 'FETCH_SUBDOMAINS',
         domain: rootDomain,
-        apiKey: input.apiKey
+        apiKey: input.apiKey,
+        // Pass rootDomain for cancellation check
       });
       
       if (response.success && response.data?.response?.domains) {
@@ -115,7 +122,7 @@ export async function performScan(input: {
         subdomains.forEach((subdomain: string) => {
           const name = subdomain.toLowerCase();
           if (!isExcludedSubdomain(name)) {
-            collectedDomains.add(name);
+            collectedSubdomains.add(name);
           }
         });
       } else if (!response.success) {
@@ -127,14 +134,10 @@ export async function performScan(input: {
   }
   
   // Convert set to array to control order: subdomains first.
-  const subdomainsToScan = Array.from(collectedDomains);
-  const allDomainsToScan = [...subdomainsToScan];
+  const subdomainsToScan = Array.from(collectedSubdomains);
   
-  // Add the original input domain to the end of the list if it's not already there
-  // This ensures subdomains are always scanned first.
-  if (!collectedDomains.has(input.domain)) {
-    allDomainsToScan.push(input.domain);
-  }
+  // Add the original input domain to the END of the list.
+  const allDomainsToScan = [...subdomainsToScan, rootDomain];
 
   const scanPromises = allDomainsToScan.map(
     async (domain) => {
@@ -162,12 +165,12 @@ export async function performScan(input: {
     }
   );
 
-  // Promise.all will run scans in parallel. The filter removes any nulls from failed scans.
   const results = (await Promise.all(scanPromises)).filter(
     (r): r is ScanResult => r !== null
   );
 
   if (results.length === 0) {
+    // This now only throws if NO domains (root or sub) could be analyzed at all.
     throw new Error(`Scan failed for ${rootDomain}. No domains could be analyzed.`);
   }
 

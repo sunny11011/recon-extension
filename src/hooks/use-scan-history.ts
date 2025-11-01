@@ -68,13 +68,11 @@ const useStore = create<ScanHistoryState>((set, get) => ({
     set((state) => {
       const isAlreadyQueued = state.scanQueue.includes(rootDomain);
       const isCurrentlyScanning = state.currentlyScanningDomain === rootDomain;
-      const wasScannedInSession = state.sessionDomains.includes(rootDomain);
-      const isIgnored = state.ignoredDomains.includes(rootDomain);
-      // Also check against full history
       const wasScannedInHistory = state.history.some(item => item.rootDomain === rootDomain);
+      const isIgnored = state.ignoredDomains.includes(rootDomain);
 
-      if (isAlreadyQueued || isCurrentlyScanning || wasScannedInSession || isIgnored || wasScannedInHistory) {
-        console.log(`[zustand] Skipping ${rootDomain}: already queued, scanning, in session, ignored, or in history.`);
+      if (isAlreadyQueued || isCurrentlyScanning || isIgnored || wasScannedInHistory) {
+        console.log(`[zustand] Skipping ${rootDomain}: already handled.`);
         return {}; // No change
       }
       
@@ -119,7 +117,6 @@ const useStore = create<ScanHistoryState>((set, get) => ({
       return;
     }
     
-    // Set initial length if starting a new batch
     if (!state.isProcessingQueue) {
         set({ initialQueueLength: state.scanQueue.length });
     }
@@ -127,6 +124,9 @@ const useStore = create<ScanHistoryState>((set, get) => ({
     const domainToScan = state.scanQueue[0];
     set({ isProcessingQueue: true, currentlyScanningDomain: domainToScan });
     console.log(`[zustand] Processing queue for: ${domainToScan}`);
+
+    // Clear any previous cancellation for this domain
+    browser.runtime.sendMessage({ type: 'CLEAR_CANCELLED', domain: domainToScan });
 
     try {
       const settings = await browserStorage.get<{ 'viewdns-key'?: string, 'wordlist'?: typeof defaultWordlist } >('settings');
@@ -137,6 +137,11 @@ const useStore = create<ScanHistoryState>((set, get) => ({
         wordlist: settings?.wordlist || defaultWordlist,
       });
 
+      if (get().currentlyScanningDomain !== domainToScan) {
+         console.log(`[zustand] Scan for ${domainToScan} was skipped or cancelled. Discarding results.`);
+         return;
+      }
+      
       if (scanOutput?.results?.length > 0) {
         get().addScanResults(scanOutput.results);
         toast({
@@ -153,35 +158,45 @@ const useStore = create<ScanHistoryState>((set, get) => ({
         }));
       }
     } catch (error: any) {
-      console.error(`[zustand] Scan failed for ${domainToScan}:`, error);
-      toast({
-        variant: 'destructive',
-        title: 'Scan Failed',
-        description: error.message || `Could not scan ${domainToScan}`,
-      });
+       if (get().currentlyScanningDomain === domainToScan) {
+          console.error(`[zustand] Scan failed for ${domainToScan}:`, error);
+          toast({
+            variant: 'destructive',
+            title: 'Scan Failed',
+            description: error.message || `Could not scan ${domainToScan}`,
+          });
+       }
     } finally {
-      console.log(`[zustand] Finished processing: ${domainToScan}`);
-      set((prevState) => ({
-        isProcessingQueue: false,
-        currentlyScanningDomain: null,
-        scanQueue: prevState.scanQueue.slice(1),
-      }));
+      if (get().currentlyScanningDomain === domainToScan) {
+        console.log(`[zustand] Finished processing: ${domainToScan}`);
+        set((prevState) => ({
+          isProcessingQueue: false,
+          currentlyScanningDomain: null,
+          scanQueue: prevState.scanQueue.slice(1),
+        }));
+      }
     }
   },
 
   skipCurrentScan: () => {
     set((state) => {
-      if (!state.currentlyScanningDomain) return {};
+      const domainToSkip = state.currentlyScanningDomain;
+      if (!domainToSkip) return {};
+
+      console.log(`[zustand] Skipping scan for ${domainToSkip}`);
       toast({
         title: 'Scan Skipped',
-        description: `Skipped scanning for ${state.currentlyScanningDomain}.`,
+        description: `Skipped scanning for ${domainToSkip}.`,
       });
-       const newQueue = state.scanQueue.slice(1);
+      
+      // Tell the background script to cancel ongoing operations for this domain
+      browser.runtime.sendMessage({ type: 'CANCEL_SCAN', domain: domainToSkip });
+
+      const newQueue = state.scanQueue.slice(1);
       return {
         isProcessingQueue: false,
         currentlyScanningDomain: null,
         scanQueue: newQueue,
-        // Reset initial length if the queue becomes empty
         initialQueueLength: newQueue.length === 0 ? 0 : state.initialQueueLength,
       };
     });
@@ -214,7 +229,6 @@ const useStore = create<ScanHistoryState>((set, get) => ({
   },
 }));
 
-// A flag to ensure initialization happens only once
 let isInitialized = false;
 
 export function useScanHistory() {
@@ -224,9 +238,10 @@ export function useScanHistory() {
     if (!isInitialized) {
       console.log('[useScanHistory] Initializing state from storage...');
       state._init();
-      // Listen for messages from the background script to add to the queue
+      
       const messageListener = (message: any) => {
           if (message.type === 'ADD_TO_QUEUE' && message.domain) {
+              console.log('[useScanHistory] Received ADD_TO_QUEUE message from background.');
               state.addScanToQueue(message.domain);
           }
       };
@@ -236,7 +251,6 @@ export function useScanHistory() {
   }, []);
 
   useEffect(() => {
-    // This effect runs whenever the queue changes or processing stops
     if (state.scanQueue.length > 0 && !state.isProcessingQueue) {
       state.processQueue();
     }
