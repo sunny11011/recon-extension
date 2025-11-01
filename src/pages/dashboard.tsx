@@ -168,6 +168,8 @@ function DashboardPage() {
     isProcessingQueue,
     currentlyScanningDomain,
     skipCurrentScan,
+    scanQueue,
+    initialQueueLength,
   } = useScanHistory();
 
   const handleManualScan = () => {
@@ -185,6 +187,8 @@ function DashboardPage() {
     acc[rootDomain].push(result);
     return acc;
   }, {} as Record<string, ScanResult[]>);
+
+  const currentScanIndex = initialQueueLength - scanQueue.length;
 
   return (
     <div className="flex flex-col h-full w-full p-4 space-y-4">
@@ -214,7 +218,10 @@ function DashboardPage() {
           <Info className="h-4 w-4" />
           <div className="flex items-center justify-between w-full">
             <div>
-              <AlertTitle>Scanning in Progress</AlertTitle>
+              <AlertTitle>
+                Scanning in Progress 
+                {initialQueueLength > 0 && ` (${currentScanIndex} of ${initialQueueLength})`}
+              </AlertTitle>
               <AlertDescription>
                 Currently scanning:{" "}
                 <code className="font-semibold">{currentlyScanningDomain}</code>

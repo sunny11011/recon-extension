@@ -20,6 +20,7 @@ interface ScanHistoryState {
   isProcessingQueue: boolean;
   currentlyScanningDomain: string | null;
   ignoredDomains: string[];
+  initialQueueLength: number;
   setHistory: (history: HistoryItem[]) => void;
   setIgnoredDomains: (domains: string[]) => void;
   addScanToQueue: (domain: string) => void;
@@ -40,6 +41,7 @@ const useStore = create<ScanHistoryState>((set, get) => ({
   isProcessingQueue: false,
   currentlyScanningDomain: null,
   ignoredDomains: [],
+  initialQueueLength: 0,
   
   _init: async () => {
     const [history, ignoredDomains] = await Promise.all([
@@ -67,13 +69,20 @@ const useStore = create<ScanHistoryState>((set, get) => ({
       const isAlreadyQueued = state.scanQueue.includes(rootDomain);
       const isCurrentlyScanning = state.currentlyScanningDomain === rootDomain;
       const wasScannedInSession = state.sessionDomains.includes(rootDomain);
+      const isIgnored = state.ignoredDomains.includes(rootDomain);
+      // Also check against full history
+      const wasScannedInHistory = state.history.some(item => item.rootDomain === rootDomain);
 
-      if (isAlreadyQueued || isCurrentlyScanning || wasScannedInSession) {
+      if (isAlreadyQueued || isCurrentlyScanning || wasScannedInSession || isIgnored || wasScannedInHistory) {
+        console.log(`[zustand] Skipping ${rootDomain}: already queued, scanning, in session, ignored, or in history.`);
         return {}; // No change
       }
       
       console.log(`[zustand] Adding ${rootDomain} to scan queue.`);
-      return { scanQueue: [...state.scanQueue, rootDomain] };
+      return { 
+          scanQueue: [...state.scanQueue, rootDomain],
+          initialQueueLength: state.initialQueueLength === 0 && !state.isProcessingQueue ? state.scanQueue.length + 1 : state.initialQueueLength,
+      };
     });
   },
 
@@ -104,7 +113,15 @@ const useStore = create<ScanHistoryState>((set, get) => ({
   processQueue: async () => {
     const state = get();
     if (state.isProcessingQueue || state.scanQueue.length === 0) {
+      if (state.scanQueue.length === 0) {
+          set({ isProcessingQueue: false, currentlyScanningDomain: null, initialQueueLength: 0 });
+      }
       return;
+    }
+    
+    // Set initial length if starting a new batch
+    if (!state.isProcessingQueue) {
+        set({ initialQueueLength: state.scanQueue.length });
     }
 
     const domainToScan = state.scanQueue[0];
@@ -124,14 +141,13 @@ const useStore = create<ScanHistoryState>((set, get) => ({
         get().addScanResults(scanOutput.results);
         toast({
           title: 'Scan Complete',
-          description: `Found ${scanOutput.results.length} results for ${domainToScan}`,
+          description: `Found results for ${domainToScan}`,
         });
       } else {
         toast({
           title: 'Scan Complete',
           description: `No vulnerabilities found for ${domainToScan}.`,
         });
-        // Also add to session domains so we don't re-scan automatically
          set((prevState) => ({
             sessionDomains: Array.from(new Set([...prevState.sessionDomains, domainToScan]))
         }));
@@ -160,10 +176,13 @@ const useStore = create<ScanHistoryState>((set, get) => ({
         title: 'Scan Skipped',
         description: `Skipped scanning for ${state.currentlyScanningDomain}.`,
       });
+       const newQueue = state.scanQueue.slice(1);
       return {
         isProcessingQueue: false,
         currentlyScanningDomain: null,
-        scanQueue: state.scanQueue.slice(1),
+        scanQueue: newQueue,
+        // Reset initial length if the queue becomes empty
+        initialQueueLength: newQueue.length === 0 ? 0 : state.initialQueueLength,
       };
     });
   },
@@ -205,6 +224,13 @@ export function useScanHistory() {
     if (!isInitialized) {
       console.log('[useScanHistory] Initializing state from storage...');
       state._init();
+      // Listen for messages from the background script to add to the queue
+      const messageListener = (message: any) => {
+          if (message.type === 'ADD_TO_QUEUE' && message.domain) {
+              state.addScanToQueue(message.domain);
+          }
+      };
+      browser.runtime.onMessage.addListener(messageListener);
       isInitialized = true;
     }
   }, []);
