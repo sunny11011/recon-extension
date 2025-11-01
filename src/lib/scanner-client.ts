@@ -5,12 +5,12 @@ async function sendMessageToBackground<T = any>(message: any): Promise<T> {
   try {
     const response = await browser.runtime.sendMessage(message);
     if (response?.success === false) { 
-      throw new Error(response.error || 'Background script returned an error');
+      return response;
     }
     return response;
   } catch (error: any) {
      console.error(`Error sending message to background: ${message.type}`, error);
-     throw new Error(error.message);
+     return { success: false, error: error.message } as T;
   }
 }
 
@@ -27,7 +27,6 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
             url: `${fullUrl}${check.path}`
         });
 
-        // A status of 200 means we found something.
         if (response && response.success && response.status === 200) {
             const severity = check.severity.charAt(0).toUpperCase() + check.severity.slice(1);
             const type = check.type === 'directory' ? 'Directory Listing' : 'Sensitive File';
@@ -43,7 +42,6 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
               });
             }
         }
-        // If the response failed or status is not 200, we just ignore and continue.
       } catch (error) {
         console.warn(`Skipping path ${check.path} for domain ${domain} due to error:`, error);
       }
@@ -67,7 +65,6 @@ export function getRootDomain(domain: string): string {
         }
         return url.hostname;
     } catch (e) {
-        // Fallback for simple hostnames that might not parse as a full URL
         const hostname = domain.split('/')[0];
         const parts = hostname.split('.');
          if (parts.length > 2) {
@@ -100,67 +97,77 @@ export async function performScan(input: {
   apiKey: string;
   wordlist: Wordlist;
 }): Promise<ScanOutput> {
-  const domainsToScan = new Set<string>();
   const rootDomain = getRootDomain(input.domain);
+  const collectedDomains = new Set<string>();
   let rawData: any = null;
-
-  // Always add the initial input domain
-  domainsToScan.add(input.domain);
-  // And its root, if different
-  if (rootDomain !== input.domain) {
-    domainsToScan.add(rootDomain);
-  }
 
   if (input.apiKey) {
     try {
-      const response = await sendMessageToBackground<{ data: any }>({
+      const response = await sendMessageToBackground<{ success: boolean, data: any, error?: string }>({
         type: 'FETCH_SUBDOMAINS',
         domain: rootDomain,
         apiKey: input.apiKey
       });
       
-      rawData = response.data;
-      if (response.data?.response?.domains) {
+      if (response.success && response.data?.response?.domains) {
+        rawData = response.data;
         let subdomains: string[] = response.data.response.domains;
         subdomains.forEach((subdomain: string) => {
           const name = subdomain.toLowerCase();
           if (!isExcludedSubdomain(name)) {
-            domainsToScan.add(name);
+            collectedDomains.add(name);
           }
         });
+      } else if (!response.success) {
+        console.warn('Subdomain fetch failed:', response.error);
       }
     } catch (error) {
-      console.warn('Subdomain fetch failed, proceeding with root domain scan:', error);
+      console.warn('Subdomain fetch failed catastrophically:', error);
     }
   }
+  
+  // Convert set to array to control order: subdomains first.
+  const subdomainsToScan = Array.from(collectedDomains);
+  const allDomainsToScan = [...subdomainsToScan];
+  
+  // Add the original input domain to the end of the list if it's not already there
+  // This ensures subdomains are always scanned first.
+  if (!collectedDomains.has(input.domain)) {
+    allDomainsToScan.push(input.domain);
+  }
 
-  const scanPromises = Array.from(domainsToScan).map(
+  const scanPromises = allDomainsToScan.map(
     async (domain) => {
-      // Don't pre-check if a domain is live. Just try to scan it.
-      // If runReconChecks returns no findings, that's fine.
-      const findings = await runReconChecks(domain, input.wordlist);
-      let status: ScanResult['status'] = 'Secure';
+      try {
+        const findings = await runReconChecks(domain, input.wordlist);
+        let status: ScanResult['status'] = 'Secure';
 
-      if (findings.length > 0) {
-        const hasCritical = findings.some((f) => f.severity === 'Critical');
-        const hasHigh = findings.some((f) => f.severity === 'High');
-        const hasMedium = findings.some((f) => f.severity === 'Medium');
+        if (findings.length > 0) {
+          const hasCritical = findings.some((f) => f.severity === 'Critical');
+          const hasHigh = findings.some((f) => f.severity === 'High');
+          const hasMedium = findings.some((f) => f.severity === 'Medium');
 
-        if (hasCritical) status = 'Vulnerable';
-        else if (hasHigh) status = 'Vulnerable';
-        else if (hasMedium) status = 'Potentially Vulnerable';
-        else status = 'Scanned'; // Has findings, but none are Medium or higher
+          if (hasCritical) status = 'Vulnerable';
+          else if (hasHigh) status = 'Vulnerable';
+          else if (hasMedium) status = 'Potentially Vulnerable';
+          else status = 'Scanned';
+        }
+        return { domain, status, ip: null, findings };
+      } catch (e) {
+          // If runReconChecks has an unexpected failure, log it and return null
+          // so that Promise.all doesn't fail the entire scan.
+          console.error(`An unexpected error occurred while scanning ${domain}:`, e);
+          return null;
       }
-      return { domain, status, ip: null, findings };
     }
   );
 
+  // Promise.all will run scans in parallel. The filter removes any nulls from failed scans.
   const results = (await Promise.all(scanPromises)).filter(
     (r): r is ScanResult => r !== null
   );
 
   if (results.length === 0) {
-    // This should now only happen if the initial domain is the only one and it fails completely.
     throw new Error(`Scan failed for ${rootDomain}. No domains could be analyzed.`);
   }
 
