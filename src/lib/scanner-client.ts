@@ -1,40 +1,18 @@
 import { browser } from '#imports';
-import { Wordlist, ScanResult, ScanOutput, Finding } from './types';
+import { Wordlist, ScanResult, Finding, ScanOutput } from './types';
 
 async function sendMessageToBackground<T = any>(message: any): Promise<T> {
   try {
     const response = await browser.runtime.sendMessage(message);
-    if (!response || response.success === false) { // Check for undefined or explicit false
-      throw new Error(response?.error || 'Background script returned an invalid response');
+    if (response?.success === false) { 
+      // The background script caught an error and reported it.
+      throw new Error(response.error || 'Background script returned an error');
     }
     return response;
   } catch (error: any) {
+     // This catches errors like the background script not being available
      console.error(`Error sending message to background: ${message.type}`, error);
      throw new Error(error.message);
-  }
-}
-
-async function checkUrl(url: string, originalPath: string): Promise<{finalUrl: string, ok: boolean, text: () => Promise<string> } | null> {
-  try {
-    const response = await sendMessageToBackground<{ status: number, url: string, data: string }>({
-      type: 'CHECK_URL',
-      url: url
-    });
-
-    // Check if the request was redirected to a different path
-    const finalUrl = new URL(response.url);
-    if (finalUrl.pathname.replace(/\/$/, '') !== originalPath.replace(/\/$/, '')) {
-      return null; // Redirected to a different path
-    }
-
-    return {
-      finalUrl: response.url,
-      ok: response.status >= 200 && response.status < 300,
-      text: async () => response.data
-    };
-  } catch (error) {
-    console.warn(`checkUrl for ${url} failed:`, error);
-    return null;
   }
 }
 
@@ -48,9 +26,14 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
   for (let i = 0; i < checks.length; i += batchSize) {
     const batch = checks.slice(i, i + batchSize);
     const promises = batch.map(async (check) => {
-      const res = await checkUrl(`${fullUrl}${check.path}`, check.path);
-      if (res && res.ok) {
-        const text = await res.text();
+      
+      const response = await sendMessageToBackground<{ status: number, url: string, data: string }>({
+          type: 'CHECK_URL',
+          url: `${fullUrl}${check.path}`
+      }).catch(() => null); // If message sending fails, treat as a failed check
+
+      if (response) {
+        const text = response.data;
         const lowerText = text.toLowerCase();
 
         const isPositiveMatch = check.positive_match.some((keyword) =>
@@ -104,6 +87,7 @@ export function getRootDomain(domain: string): string {
         }
         return url.hostname;
     } catch (e) {
+        // Fallback for simple hostnames that might not parse as a full URL
         const hostname = domain.split('/')[0];
         const parts = hostname.split('.');
          if (parts.length > 2) {
@@ -169,17 +153,19 @@ export async function performScan(input: {
         }
       } catch (error) {
         console.warn('Subdomain fetch failed, proceeding with root domain scan:', error);
-        // Don't re-throw, allow the scan to continue with the root domain
       }
     }
 
+    // Add the user-provided domain if it's different from the root and not already in the list
     if (input.domain !== rootDomain && !domainsToScan.has(input.domain)) {
       domainsToScan.set(input.domain, null);
     }
 
     const scanPromises = Array.from(domainsToScan.keys()).map(
       async (domain) => {
-        const liveCheckResponse = await checkUrl(`https://${domain}`, '/');
+        // First check if the domain is live at all
+        const liveCheckResponse = await sendMessageToBackground({ type: 'CHECK_URL', url: `https://${domain}` }).catch(() => null);
+
         if (liveCheckResponse) {
           const findings = await runReconChecks(domain, input.wordlist);
           let status: ScanResult['status'] = 'Secure';
@@ -192,11 +178,12 @@ export async function performScan(input: {
             if (hasCritical) status = 'Vulnerable';
             else if (hasHigh) status = 'Vulnerable';
             else if (hasMedium) status = 'Potentially Vulnerable';
-            else status = 'Scanned';
+            else status = 'Scanned'; // Has findings, but none are Medium or higher
           }
           return { domain, status, ip: null, findings };
         }
-        return null;
+        // If the initial check fails, we still want to report on it as unscanned.
+        return { domain, status: 'Scanned', ip: null, findings: [] };
       }
     );
 
@@ -204,13 +191,14 @@ export async function performScan(input: {
       (r): r is ScanResult => r !== null
     );
 
+    // Only fail if absolutely no domains (including subdomains) could be processed.
     if (results.length === 0) {
-      throw new Error(`No live domains found for ${rootDomain}. The host may be down or blocking requests.`);
+      throw new Error(`No domains found for ${rootDomain}. Check the domain and API key.`);
     }
 
     return { results, rawData };
   } catch (error: any) {
     console.error('Scan error:', error);
-    throw error; // Re-throw to be caught by the UI layer
+    throw error;
   }
 }

@@ -70,20 +70,24 @@ export default defineBackground(() => {
         method: 'GET',
         headers: STEALTH_HEADERS,
         redirect: 'follow', // Follow redirects to get the final status
+        mode: 'cors'
       });
 
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => {
         responseHeaders[key] = value;
       });
-
-      return {
+      
+      const responseData = {
         success: true,
         status: response.status,
         url: response.url, // Return the final URL after redirects
         headers: responseHeaders,
         data: await response.text().catch(() => ''), // Read body, ignore errors for empty/binary
       };
+      
+      return responseData;
+
     } catch (error: any) {
       console.error(`[background] checkUrl failed for ${url}:`, error);
       return { success: false, error: error.message };
