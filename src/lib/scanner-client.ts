@@ -2,41 +2,38 @@ import { browser } from '#imports';
 import { Wordlist, ScanResult, ScanOutput, Finding } from './types';
 
 async function sendMessageToBackground<T = any>(message: any): Promise<T> {
-  const response = await browser.runtime.sendMessage(message);
-  if (response.success === false) { // Explicitly check for false
-    throw new Error(response.error || 'Background script returned an error');
+  try {
+    const response = await browser.runtime.sendMessage(message);
+    if (!response || response.success === false) { // Check for undefined or explicit false
+      throw new Error(response?.error || 'Background script returned an invalid response');
+    }
+    return response;
+  } catch (error: any) {
+     console.error(`Error sending message to background: ${message.type}`, error);
+     throw new Error(error.message);
   }
-  return response;
 }
 
-
-async function checkUrl(url: string, originalPath: string): Promise<Response | null> {
+async function checkUrl(url: string, originalPath: string): Promise<{finalUrl: string, ok: boolean, text: () => Promise<string> } | null> {
   try {
-    const response = await sendMessageToBackground<{ status: number, headers: Record<string, string>, data: string }>({
+    const response = await sendMessageToBackground<{ status: number, url: string, data: string }>({
       type: 'CHECK_URL',
       url: url
     });
 
-    // Handle redirects by checking the 'location' header from the manual fetch
-    const location = response.headers['location'] || response.headers['Location'];
-    if (location) {
-      try {
-        const finalUrl = new URL(location, url); // Resolve relative URLs
-        if (finalUrl.pathname.replace(/\/$/, '') !== originalPath.replace(/\/$/, '')) {
-          return null; // Redirected to a different path
-        }
-      } catch (e) {
-        return null; // Invalid redirect URL
-      }
+    // Check if the request was redirected to a different path
+    const finalUrl = new URL(response.url);
+    if (finalUrl.pathname.replace(/\/$/, '') !== originalPath.replace(/\/$/, '')) {
+      return null; // Redirected to a different path
     }
 
-    // Reconstruct a Response-like object to maintain interface consistency
-    return new Response(response.data, {
-      status: response.status,
-      headers: new Headers(response.headers)
-    });
+    return {
+      finalUrl: response.url,
+      ok: response.status >= 200 && response.status < 300,
+      text: async () => response.data
+    };
   } catch (error) {
-    console.error(`Error in checkUrl via background script for ${url}:`, error);
+    console.warn(`checkUrl for ${url} failed:`, error);
     return null;
   }
 }
@@ -46,12 +43,6 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
   const fullUrl = `https://${domain}`;
   const checks = JSON.parse(JSON.stringify(wordlist.endpoints));
   const seenFindings = new Set<string>();
-
-  // Fisher-Yates shuffle
-  for (let i = checks.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [checks[i], checks[j]] = [checks[j], checks[i]];
-  }
 
   const batchSize = 10;
   for (let i = 0; i < checks.length; i += batchSize) {
@@ -164,7 +155,7 @@ export async function performScan(input: {
         
         rawData = response.data;
         if (response.data?.response?.domains) {
-          let subdomains = response.data.response.domains;
+          let subdomains: string[] = response.data.response.domains;
           if (subdomains.length > SUBDOMAIN_THRESHOLD) {
             subdomains = subdomains.slice(0, SUBDOMAIN_THRESHOLD);
           }

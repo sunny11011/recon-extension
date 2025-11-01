@@ -112,13 +112,12 @@ const useStore = create<ScanHistoryState>((set, get) => ({
     console.log(`[zustand] Processing queue for: ${domainToScan}`);
 
     try {
-      const apiKey = await browserStorage.get<string>('viewdns-key');
-      const wordlistData = await browserStorage.get<typeof defaultWordlist>('wordlist') || defaultWordlist;
+      const settings = await browserStorage.get<{ 'viewdns-key'?: string, 'wordlist'?: typeof defaultWordlist } >('settings');
       
       const scanOutput = await performScan({
         domain: domainToScan,
-        apiKey: apiKey || '',
-        wordlist: wordlistData,
+        apiKey: settings?.['viewdns-key'] || '',
+        wordlist: settings?.wordlist || defaultWordlist,
       });
 
       if (scanOutput?.results?.length > 0) {
@@ -132,6 +131,10 @@ const useStore = create<ScanHistoryState>((set, get) => ({
           title: 'Scan Complete',
           description: `No vulnerabilities found for ${domainToScan}.`,
         });
+        // Also add to session domains so we don't re-scan automatically
+         set((prevState) => ({
+            sessionDomains: Array.from(new Set([...prevState.sessionDomains, domainToScan]))
+        }));
       }
     } catch (error: any) {
       console.error(`[zustand] Scan failed for ${domainToScan}:`, error);
@@ -146,7 +149,6 @@ const useStore = create<ScanHistoryState>((set, get) => ({
         isProcessingQueue: false,
         currentlyScanningDomain: null,
         scanQueue: prevState.scanQueue.slice(1),
-        sessionDomains: Array.from(new Set([...prevState.sessionDomains, domainToScan]))
       }));
     }
   },
@@ -171,12 +173,8 @@ const useStore = create<ScanHistoryState>((set, get) => ({
   deleteHistoryItem: (rootDomain) => {
     set((state) => {
       const newHistory = state.history.filter((h) => h.rootDomain !== rootDomain);
-      const newSessionDomains = state.sessionDomains.filter((d) => d !== rootDomain);
       browserStorage.set('scan-history', newHistory);
-      return {
-        history: newHistory,
-        sessionDomains: newSessionDomains,
-      };
+      return { history: newHistory };
     });
   },
 

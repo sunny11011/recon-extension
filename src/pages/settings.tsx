@@ -25,10 +25,15 @@ import { getRootDomain } from "../lib/scanner-client";
 import defaultWordlistData from "../lib/wordlists.json";
 import { ExternalLink, Trash2 } from "lucide-react";
 
+type Settings = {
+  'viewdns-key'?: string;
+  'auto-scan-enabled'?: boolean;
+  'wordlist'?: any;
+}
+
 function SettingsPage() {
-  const [viewdnsApiKey, setViewdnsApiKey] = useState("");
-  const [wordlist, setWordlist] = useState("");
-  const [autoScanEnabled, setAutoScanEnabled] = useState(false);
+  const [settings, setSettings] = useState<Settings>({});
+  const [wordlistText, setWordlistText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const { toast } = useToast();
   const { ignoredDomains, addIgnoredDomain, removeIgnoredDomain } = useScanHistory();
@@ -36,16 +41,12 @@ function SettingsPage() {
   useEffect(() => {
     const loadSettings = async () => {
       try {
-        const [apiKey, autoScan, savedWordlist] = await Promise.all([
-          browserStorage.get<string>("viewdns-key"),
-          browserStorage.get<boolean>("auto-scan-enabled"),
-          browserStorage.get<any>("wordlist"),
-        ]);
-
-        setViewdnsApiKey(apiKey || "");
-        setAutoScanEnabled(autoScan || false);
-        setWordlist(
-          savedWordlist ? JSON.stringify(savedWordlist, null, 2) : JSON.stringify(defaultWordlistData, null, 2)
+        const storedSettings = await browserStorage.get<Settings>("settings");
+        setSettings(storedSettings || {});
+        setWordlistText(
+          storedSettings?.wordlist
+            ? JSON.stringify(storedSettings.wordlist, null, 2)
+            : JSON.stringify(defaultWordlistData, null, 2)
         );
       } catch (error) {
         console.error("Error loading settings:", error);
@@ -61,44 +62,32 @@ function SettingsPage() {
     loadSettings();
   }, [toast]);
 
+  const updateSetting = async (key: keyof Settings, value: any) => {
+    const newSettings = { ...settings, [key]: value };
+    setSettings(newSettings);
+    await browserStorage.set("settings", newSettings);
+  };
+
+
   const handleAutoScanChange = async (checked: boolean) => {
-    try {
-      setAutoScanEnabled(checked);
-      await browserStorage.set("auto-scan-enabled", checked);
-      toast({
-        title: `Auto-scan ${checked ? "enabled" : "disabled"}`,
-      });
-    } catch (error) {
-      console.error("Error saving auto-scan setting:", error);
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Failed to save auto-scan setting",
-      });
-    }
+    await updateSetting('auto-scan-enabled', checked);
+    toast({
+      title: `Auto-scan ${checked ? "enabled" : "disabled"}`,
+    });
   };
 
   const handleSaveApiKeys = async () => {
-    try {
-      await browserStorage.set("viewdns-key", viewdnsApiKey);
-      toast({
-        title: "API Key Saved",
-        description: "Your ViewDNS API key has been saved successfully.",
-      });
-    } catch (error) {
-      console.error("Error saving API key:", error);
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Failed to save API key",
-      });
-    }
+    await updateSetting('viewdns-key', settings['viewdns-key'] || '');
+    toast({
+      title: "API Key Saved",
+      description: "Your ViewDNS API key has been saved successfully.",
+    });
   };
 
   const handleSaveWordlist = async () => {
     try {
-      const parsed = JSON.parse(wordlist);
-      await browserStorage.set("wordlist", parsed);
+      const parsed = JSON.parse(wordlistText);
+      await updateSetting('wordlist', parsed);
       toast({
         title: "Wordlist Saved",
         description:
@@ -114,20 +103,12 @@ function SettingsPage() {
   };
   
   const handleRestoreDefaultWordlist = async () => {
-    try {
-      await browserStorage.set("wordlist", defaultWordlistData);
-      setWordlist(JSON.stringify(defaultWordlistData, null, 2));
-      toast({
-        title: "Wordlist Restored",
-        description: "The default wordlist has been restored.",
-      });
-    } catch (e) {
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Could not restore the default wordlist.",
-      });
-    }
+    setWordlistText(JSON.stringify(defaultWordlistData, null, 2));
+    await updateSetting('wordlist', defaultWordlistData);
+    toast({
+      title: "Wordlist Restored",
+      description: "The default wordlist has been restored.",
+    });
   };
 
 
@@ -139,7 +120,7 @@ function SettingsPage() {
       });
       if (tabs[0] && tabs[0].url) {
         const rootDomain = getRootDomain(tabs[0].url);
-        if (rootDomain) {
+        if (rootDomain && !ignoredDomains.includes(rootDomain)) {
           addIgnoredDomain(rootDomain);
           toast({
             title: "Domain Ignored",
@@ -179,7 +160,7 @@ function SettingsPage() {
             </div>
             <Switch
               id="autoscan-switch"
-              checked={autoScanEnabled}
+              checked={settings['auto-scan-enabled']}
               onCheckedChange={handleAutoScanChange}
             />
           </div>
@@ -248,8 +229,8 @@ function SettingsPage() {
               id="viewdns-api"
               type="password"
               placeholder="Your ViewDNS API Key"
-              value={viewdnsApiKey}
-              onChange={(e) => setViewdnsApiKey(e.target.value)}
+              value={settings['viewdns-key'] || ''}
+              onChange={(e) => setSettings({...settings, 'viewdns-key': e.target.value})}
             />
           </div>
           <div className="flex justify-end">
@@ -273,8 +254,8 @@ function SettingsPage() {
             <AccordionContent>
               <CardContent className="space-y-4">
                 <Textarea
-                  value={wordlist}
-                  onChange={(e) => setWordlist(e.target.value)}
+                  value={wordlistText}
+                  onChange={(e) => setWordlistText(e.target.value)}
                   rows={15}
                   className="font-mono text-xs"
                 />

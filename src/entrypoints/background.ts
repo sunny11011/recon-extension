@@ -55,10 +55,7 @@ export default defineBackground(() => {
     if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
       console.log('[background] Tab updated:', tab.url);
       try {
-        const response = await triggerScan(tab.url);
-        if (response.success && response.pending) {
-          console.log('[background] Scan triggered for tab, pending for popup.');
-        }
+        await triggerScan(tab.url);
       } catch (error) {
         console.error('[background] Error triggering auto-scan:', error);
       }
@@ -72,7 +69,7 @@ export default defineBackground(() => {
       const response = await fetch(url, {
         method: 'GET',
         headers: STEALTH_HEADERS,
-        redirect: 'manual', // We need to inspect redirects ourselves
+        redirect: 'follow', // Follow redirects to get the final status
       });
 
       const responseHeaders: Record<string, string> = {};
@@ -83,6 +80,7 @@ export default defineBackground(() => {
       return {
         success: true,
         status: response.status,
+        url: response.url, // Return the final URL after redirects
         headers: responseHeaders,
         data: await response.text().catch(() => ''), // Read body, ignore errors for empty/binary
       };
@@ -112,7 +110,8 @@ export default defineBackground(() => {
   }
   
   async function triggerScan(url: string) {
-    const isAutoScanEnabled = await browserStorage.get<boolean>('auto-scan-enabled');
+    const settings = await browserStorage.get<{ 'auto-scan-enabled'?: boolean }>('settings');
+    const isAutoScanEnabled = settings?.['auto-scan-enabled'] ?? false;
     const rootDomain = getRootDomain(url);
     
     if (isAutoScanEnabled && rootDomain) {

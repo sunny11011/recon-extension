@@ -13,6 +13,8 @@ export default defineConfig({
     ],
     host_permissions: [
       '<all_urls>'
-    ]
+    ],
+    name: 'H4ckoverflow',
+    description: 'A focused, minimalist browser extension designed to boost productivity and perform security reconnaissance.',
   },
 });
