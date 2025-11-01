@@ -1,3 +1,4 @@
+
 import { browser } from '#imports';
 import { Wordlist, ScanResult, Finding, ScanOutput } from './types';
 
@@ -5,21 +6,17 @@ async function sendMessageToBackground<T = any>(message: any): Promise<T> {
   try {
     const response = await browser.runtime.sendMessage(message);
     if (response?.success === false) {
-      // Don't log cancellation as an unexpected error
-      if (response.error === 'Scan cancelled') {
-        throw new Error('Scan cancelled');
-      }
       console.error(`Background script error for ${message.type}:`, response.error);
-      throw new Error(response.error || `Background script error for ${message.type}`);
+      throw new Error(response.error || `Unknown background script error for ${message.type}`);
     }
     return response;
   } catch (error: any) {
     console.error(`Error sending message to background for ${message.type}:`, error.message);
-    throw error; // Re-throw the error to be handled by the caller
+    throw new Error(error.message || `Failed to send message for ${message.type}`);
   }
 }
 
-async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Finding[]> {
+async function runReconChecks(domain: string, wordlist: Wordlist, rootDomain: string): Promise<Finding[]> {
   const findings: Finding[] = [];
   const checks = JSON.parse(JSON.stringify(wordlist.endpoints));
   const seenFindings = new Set<string>();
@@ -29,7 +26,7 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
       const response = await sendMessageToBackground<{ success: boolean, status: number, error?: string }>({
         type: 'CHECK_URL',
         url: `https://${domain}${check.path}`,
-        domain: domain,
+        domain: rootDomain,
       });
 
       if (response?.success && response.status === 200) {
@@ -48,12 +45,10 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
         }
       }
     } catch (error: any) {
-      // If the scan was cancelled, stop all further checks for this domain
-      if (error.message === 'Scan cancelled') {
+      if (error.message.includes('cancelled')) {
         console.log(`[scanner-client] Recon checks for ${domain} cancelled.`);
         throw error;
       }
-      // Otherwise, just log and skip the failed path
       console.warn(`Skipping path ${check.path} for domain ${domain} due to error:`, error.message);
     }
   }
@@ -64,8 +59,11 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
 export function getRootDomain(domain: string): string {
   if (!domain) return '';
   try {
-    const url = new URL(domain.startsWith('http') ? domain : `https://${domain}`);
+    const url = new URL(domain.startsWith('http') ? domain : `https://www.google.com/search?q=${domain}`);
     const parts = url.hostname.split('.');
+    if(url.hostname.endsWith('google.com')) {
+      return domain;
+    }
     if (parts.length > 2) {
       const sld = parts[parts.length - 2];
       const commonSLDs = ['co', 'com', 'org', 'net', 'gov', 'edu', 'io'];
@@ -99,18 +97,33 @@ function isExcludedSubdomain(domain: string): boolean {
 }
 
 async function getLiveDomains(domains: string[], rootDomain: string): Promise<string[]> {
-    const liveChecks = domains.map(domain => 
-        sendMessageToBackground<{ success: boolean, status: number }>({
-            type: 'CHECK_URL',
-            url: `https://${domain}`,
-            domain: rootDomain,
-        }).then(res => ({ domain, alive: res.success && res.status === 200 }))
+    const liveChecks = domains.map(domain =>
+      sendMessageToBackground<{ success: boolean, status: number }>({
+        type: 'CHECK_URL',
+        url: `https://${domain}`,
+        domain: rootDomain,
+      }).then(res => ({ domain, alive: res.success && res.status === 200 }))
         .catch(() => ({ domain, alive: false }))
     );
-
-    const results = await Promise.all(liveChecks);
-    return results.filter(res => res.alive).map(res => res.domain);
+  
+    const results = await Promise.allSettled(liveChecks);
+    const liveDomains: string[] = [];
+  
+    results.forEach(result => {
+      if (result.status === 'fulfilled' && result.value.alive) {
+        liveDomains.push(result.value.domain);
+      }
+    });
+  
+    return liveDomains;
 }
+
+type SubdomainRecord = { 
+    name: string; 
+    ips?: string[];
+    last_resolved?: string | null;
+};
+
 
 export async function performScan(input: {
   domain: string;
@@ -118,8 +131,9 @@ export async function performScan(input: {
   wordlist: Wordlist;
 }): Promise<ScanOutput> {
   const rootDomain = getRootDomain(input.domain);
-  const collectedSubdomains = new Set<string>();
+  const subdomainsToCheck = new Set<string>();
   let rawData: any = null;
+  const SUBDOMAIN_THRESHOLD = 50;
 
   if (input.apiKey) {
     try {
@@ -131,36 +145,49 @@ export async function performScan(input: {
 
       if (response.success && response.data?.response?.domains) {
         rawData = response.data;
-        let subdomains: string[] = response.data.response.domains;
-        subdomains.forEach((subdomain: string) => {
-          const name = subdomain.toLowerCase();
+        let subdomains: SubdomainRecord[] = response.data.response.domains;
+        const subdomainCount = response.data.response.subdomain_count ? parseInt(response.data.response.subdomain_count, 10) : 0;
+
+        if (subdomainCount > SUBDOMAIN_THRESHOLD) {
+            subdomains = subdomains.filter(record => record.last_resolved !== null);
+        }
+        if (subdomains.length > SUBDOMAIN_THRESHOLD) {
+            subdomains = subdomains.filter(record => !/\d/.test(record.name));
+        }
+        if (subdomains.length > SUBDOMAIN_THRESHOLD) {
+            subdomains = subdomains.slice(0, SUBDOMAIN_THRESHOLD);
+        }
+
+        subdomains.forEach((record) => {
+          const name = record.name.toLowerCase();
           if (!isExcludedSubdomain(name)) {
-            collectedSubdomains.add(name);
+            subdomainsToCheck.add(name);
           }
         });
       }
     } catch (error: any) {
-        if (error.message === 'Scan cancelled') throw error;
-        console.warn('Subdomain fetch failed:', error.message);
+        if (error.message.includes('cancelled')) throw error;
+        console.warn('Subdomain fetch failed, continuing with root domain:', error.message);
     }
   }
 
-  // Create the initial list of domains to check for liveness
-  const allDomainsToCheck = Array.from(collectedSubdomains);
+  const allDomainsToCheck = Array.from(subdomainsToCheck);
   if (!allDomainsToCheck.includes(rootDomain)) {
     allDomainsToCheck.push(rootDomain);
   }
 
-  // Find live domains before performing the full scan
   const liveDomains = await getLiveDomains(allDomainsToCheck, rootDomain);
   
   if (liveDomains.length === 0) {
+      console.log(`No live domains found for ${rootDomain} after checking ${allDomainsToCheck.length} potential domains.`);
       return { results: [], rawData: null };
   }
 
+  console.log(`Found ${liveDomains.length} live domains. Starting vulnerability scan...`);
+
   const scanPromises = liveDomains.map(async (domain) => {
     try {
-      const findings = await runReconChecks(domain, input.wordlist);
+      const findings = await runReconChecks(domain, input.wordlist, rootDomain);
       let status: ScanResult['status'] = 'Secure';
 
       if (findings.length > 0) {
@@ -174,7 +201,7 @@ export async function performScan(input: {
       }
       return { domain, status, ip: null, findings };
     } catch (e: any) {
-      if (e.message === 'Scan cancelled') {
+      if (e.message.includes('cancelled')) {
         console.log(`Scan for domain ${domain} was cancelled.`);
       } else {
         console.error(`An unexpected error occurred while scanning ${domain}:`, e);
@@ -186,11 +213,6 @@ export async function performScan(input: {
   const results = (await Promise.all(scanPromises)).filter(
     (r): r is ScanResult => r !== null
   );
-
-  if (results.length === 0 && liveDomains.length > 0) {
-      // This can happen if the scan is cancelled mid-way through all domains
-      throw new Error('Scan cancelled');
-  }
 
   return { results, rawData };
 }

@@ -7,7 +7,6 @@ export default defineConfig({
   manifest: {
     permissions: [
       'storage',
-      'proxy',
       'activeTab',
       'tabs'
     ],
