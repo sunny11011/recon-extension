@@ -1,0 +1,53 @@
+
+{
+  "endpoints": [
+    {
+      "path": "/.git/config",
+      "severity": "critical",
+      "type": "file",
+      "description": "Exposed Git config file. May contain repository URLs or credentials.",
+      "positive_match": ["[core]", "remote", "url"],
+      "false_positive_indicators": ["text/html", "404 Not Found", "<!doctype html>"]
+    },
+    {
+        "path": "/.env",
+        "severity": "critical",
+        "type": "file",
+        "description": "Exposed environment variables file. May contain API keys, database credentials, or other secrets.",
+        "positive_match": ["DB_HOST", "API_KEY", "SECRET_KEY"],
+        "false_positive_indicators": ["text/html", "404 Not Found", "<!doctype html>"]
+    },
+    {
+        "path": "/admin/",
+        "severity": "high",
+        "type": "directory",
+        "description": "Potential administrative interface.",
+        "positive_match": ["login", "admin", "dashboard", "username", "password"],
+        "false_positive_indicators": ["404", "not found", "forbidden", "access denied"]
+    },
+    {
+        "path": "/backup/",
+        "severity": "medium",
+        "type": "directory",
+        "description": "Directory with backups which might contain sensitive information.",
+        "positive_match": ["index of /backup", "parent directory"],
+        "false_positive_indicators": ["404", "not found", "forbidden"]
+    },
+    {
+        "path": "/logs/",
+        "severity": "medium",
+        "type": "directory",
+        "description": "Directory with logs which might contain sensitive information.",
+        "positive_match": ["index of /logs", "parent directory"],
+        "false_positive_indicators": ["404", "not found", "forbidden"]
+    },
+    {
+      "path": "/wp-config.php.bak",
+      "severity": "high",
+      "type": "file",
+      "description": "Backup of WordPress configuration file. Often contains database credentials.",
+      "positive_match": ["DB_NAME", "DB_USER", "DB_PASSWORD"],
+      "false_positive_indicators": ["text/html", "404 Not Found"]
+    }
+  ]
+}

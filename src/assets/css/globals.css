@@ -1,0 +1,52 @@
+:root {
+  /* color tokens as numeric H S L so Tailwind can call hsl(var(--...)) */
+  --background: 220 15% 10%;
+  --foreground: 220 10% 80%;
+  --primary: 150 60% 45%;
+  --primary-foreground: 150 100% 10%;
+  --secondary: 217.2 32.6% 17.5%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 220 15% 25%;
+  --muted-foreground: 220 10% 60%;
+  --accent: 220 15% 25%;
+  --accent-foreground: 220 10% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 100%;
+  --card: 220 15% 15%;
+  --card-foreground: 220 10% 80%;
+  --popover: 220 15% 15%;
+  --popover-foreground: 220 10% 80%;
+  --border: 220 15% 25%;
+  --input: 220 15% 25%;
+  --ring: 150 60% 45%;
+  --radius: 0.5rem;
+}
+
+/* use the tokens via hsl(var(--...)) for actual colors on elements */
+html {
+  color-scheme: dark;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* light theme override (numeric tokens) */
+.light {
+  --background: 220 20% 98%;
+  --foreground: 220 10% 20%;
+  --primary: 150 70% 35%;
+  --primary-foreground: 150 100% 10%;
+  --accent: 150 60% 90%;
+  --card: 220 20% 100%;
+  --popover: 220 20% 100%;
+  --border: 220 20% 90%;
+  --input: 220 20% 96%;
+  --ring: 150 70% 35%;
+  --destructive: 0 84.2% 60.2%;
+}

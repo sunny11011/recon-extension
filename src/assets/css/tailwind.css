@@ -1,0 +1,16 @@
+@import './globals.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* keep this file for Tailwind layers and custom utilities if needed,
+   but remove the duplicate :root and the global `@apply border-border` */
+
+/* Ensure default border color uses the theme variable so UI components don't show solid white borders */
+@layer base {
+  *, *::before, *::after {
+    /* use semantic border token from globals.css */
+    border-color: hsl(var(--border)) !important;
+  }
+}
