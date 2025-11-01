@@ -1,43 +1,42 @@
 import { browser } from '#imports';
-import { userAgents } from './user-agents';
 import { Wordlist, ScanResult, ScanOutput, Finding } from './types';
 
-function getRandomUserAgent() {
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
+async function sendMessageToBackground<T = any>(message: any): Promise<T> {
+  const response = await browser.runtime.sendMessage(message);
+  if (response.success === false) { // Explicitly check for false
+    throw new Error(response.error || 'Background script returned an error');
+  }
+  return response;
 }
+
 
 async function checkUrl(url: string, originalPath: string): Promise<Response | null> {
   try {
-    const response = await browser.runtime.sendMessage({
+    const response = await sendMessageToBackground<{ status: number, headers: Record<string, string>, data: string }>({
       type: 'CHECK_URL',
       url: url
     });
 
-    if (!response.success) {
-      return null;
-    }
-
-    // Create a Response-like object from background data
-    const mockResponse = new Response(response.data, {
-      status: response.status,
-      headers: new Headers(response.headers)
-    });
-
-    // Handle redirects
-    if (response.headers.location) {
+    // Handle redirects by checking the 'location' header from the manual fetch
+    const location = response.headers['location'] || response.headers['Location'];
+    if (location) {
       try {
-        const finalUrl = new URL(response.headers.location);
+        const finalUrl = new URL(location, url); // Resolve relative URLs
         if (finalUrl.pathname.replace(/\/$/, '') !== originalPath.replace(/\/$/, '')) {
-          return null;
+          return null; // Redirected to a different path
         }
       } catch (e) {
-        return null;
+        return null; // Invalid redirect URL
       }
     }
 
-    return mockResponse;
+    // Reconstruct a Response-like object to maintain interface consistency
+    return new Response(response.data, {
+      status: response.status,
+      headers: new Headers(response.headers)
+    });
   } catch (error) {
-    console.error('Check URL error:', error);
+    console.error(`Error in checkUrl via background script for ${url}:`, error);
     return null;
   }
 }
@@ -48,6 +47,7 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
   const checks = JSON.parse(JSON.stringify(wordlist.endpoints));
   const seenFindings = new Set<string>();
 
+  // Fisher-Yates shuffle
   for (let i = checks.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [checks[i], checks[j]] = [checks[j], checks[i]];
@@ -56,18 +56,18 @@ async function runReconChecks(domain: string, wordlist: Wordlist): Promise<Findi
   const batchSize = 10;
   for (let i = 0; i < checks.length; i += batchSize) {
     const batch = checks.slice(i, i + batchSize);
-    const promises = batch.map(async (check: { path: string; positive_match: string[]; false_positive_indicators: string[]; severity: string; type: string; description: any; }) => {
+    const promises = batch.map(async (check) => {
       const res = await checkUrl(`${fullUrl}${check.path}`, check.path);
       if (res && res.ok) {
         const text = await res.text();
         const lowerText = text.toLowerCase();
 
-        const isPositiveMatch = check.positive_match.some((keyword: string) =>
+        const isPositiveMatch = check.positive_match.some((keyword) =>
           lowerText.includes(keyword.toLowerCase())
         );
 
         if (isPositiveMatch) {
-          const isFalsePositive = check.false_positive_indicators.some((keyword: string) =>
+          const isFalsePositive = check.false_positive_indicators.some((keyword) =>
             lowerText.includes(keyword.toLowerCase())
           );
 
@@ -105,7 +105,7 @@ export function getRootDomain(domain: string): string {
         const parts = url.hostname.split('.');
         if (parts.length > 2) {
             const sld = parts[parts.length - 2];
-            const commonSLDs = ['co', 'com', 'org', 'net', 'gov', 'edu'];
+            const commonSLDs = ['co', 'com', 'org', 'net', 'gov', 'edu', 'io'];
             if (commonSLDs.includes(sld) && parts.length > 2) {
                 return parts.slice(-3).join('.');
             }
@@ -113,16 +113,17 @@ export function getRootDomain(domain: string): string {
         }
         return url.hostname;
     } catch (e) {
-        const parts = domain.split('/')[0].split('.');
+        const hostname = domain.split('/')[0];
+        const parts = hostname.split('.');
          if (parts.length > 2) {
             const sld = parts[parts.length-2];
-            const commonSLDs = ['co', 'com', 'org', 'net', 'gov', 'edu'];
+            const commonSLDs = ['co', 'com', 'org', 'net', 'gov', 'edu', 'io'];
              if(commonSLDs.includes(sld) && parts.length > 2){
                return parts.slice(-3).join('.');
             }
            return parts.slice(-2).join('.');
         }
-        return domain.split('/')[0];
+        return hostname;
     }
 };
 
@@ -133,12 +134,10 @@ function isExcludedSubdomain(domain: string): boolean {
     /^mail\./i,
     /^cpanel\./i,
     /^autodiscover\./i,
+    /^shop\./i,
+    /^blog\./i,
   ];
   return excludePatterns.some((pattern) => pattern.test(domain));
-}
-
-async function sendMessageToBackground(message: any): Promise<any> {
-    return browser.runtime.sendMessage(message);
 }
 
 export async function performScan(input: {
@@ -149,45 +148,37 @@ export async function performScan(input: {
   try {
     const domainsToScan = new Map<string, string | null>();
     const SUBDOMAIN_THRESHOLD = 50;
-    let rawData: any = null;
 
     const rootDomain = getRootDomain(input.domain);
     domainsToScan.set(rootDomain, null);
 
+    let rawData: any = null;
+
     if (input.apiKey) {
       try {
-        const response = await browser.runtime.sendMessage({
+        const response = await sendMessageToBackground<{ data: any }>({
           type: 'FETCH_SUBDOMAINS',
           domain: rootDomain,
           apiKey: input.apiKey
         });
-
-        if (!response.success) {
-          throw new Error(response.error || 'Failed to fetch subdomains');
-        }
         
+        rawData = response.data;
         if (response.data?.response?.domains) {
           let subdomains = response.data.response.domains;
-          const domainCount = subdomains.length;
-
-          if (domainCount > SUBDOMAIN_THRESHOLD) {
-            subdomains = subdomains.filter((sub: { name: string; }) => !/\d/.test(sub.name));
-          }
-
           if (subdomains.length > SUBDOMAIN_THRESHOLD) {
             subdomains = subdomains.slice(0, SUBDOMAIN_THRESHOLD);
           }
 
-          subdomains.forEach((subdomain: any) => {
-            const name = subdomain.name.toLowerCase();
+          subdomains.forEach((subdomain: string) => {
+            const name = subdomain.toLowerCase();
             if (!isExcludedSubdomain(name) && !domainsToScan.has(name)) {
               domainsToScan.set(name, null);
             }
           });
         }
-      } catch (error: any) {
-        console.error('Subdomain fetch error:', error);
-        throw new Error(error.message || 'Failed to fetch subdomains.');
+      } catch (error) {
+        console.warn('Subdomain fetch failed, proceeding with root domain scan:', error);
+        // Don't re-throw, allow the scan to continue with the root domain
       }
     }
 
@@ -195,27 +186,24 @@ export async function performScan(input: {
       domainsToScan.set(input.domain, null);
     }
 
-    const scanPromises = Array.from(domainsToScan.entries()).map(
-      async ([domain, ip]) => {
+    const scanPromises = Array.from(domainsToScan.keys()).map(
+      async (domain) => {
         const liveCheckResponse = await checkUrl(`https://${domain}`, '/');
         if (liveCheckResponse) {
           const findings = await runReconChecks(domain, input.wordlist);
-          let status = 'Secure';
+          let status: ScanResult['status'] = 'Secure';
 
           if (findings.length > 0) {
             const hasCritical = findings.some((f) => f.severity === 'Critical');
             const hasHigh = findings.some((f) => f.severity === 'High');
             const hasMedium = findings.some((f) => f.severity === 'Medium');
 
-            if (hasCritical || hasHigh) {
-              status = 'Vulnerable';
-            } else if (hasMedium) {
-              status = 'Potentially Vulnerable';
-            } else {
-              status = 'Scanned';
-            }
+            if (hasCritical) status = 'Vulnerable';
+            else if (hasHigh) status = 'Vulnerable';
+            else if (hasMedium) status = 'Potentially Vulnerable';
+            else status = 'Scanned';
           }
-          return { domain, status, ip: ip || null, findings };
+          return { domain, status, ip: null, findings };
         }
         return null;
       }
@@ -225,9 +213,13 @@ export async function performScan(input: {
       (r): r is ScanResult => r !== null
     );
 
+    if (results.length === 0) {
+      throw new Error(`No live domains found for ${rootDomain}. The host may be down or blocking requests.`);
+    }
+
     return { results, rawData };
   } catch (error: any) {
     console.error('Scan error:', error);
-    throw new Error(error.message || 'An unknown error occurred during the scan.');
+    throw error; // Re-throw to be caught by the UI layer
   }
 }

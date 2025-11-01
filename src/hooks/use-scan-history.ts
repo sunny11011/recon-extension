@@ -1,9 +1,10 @@
 import { create } from 'zustand';
+import { useEffect } from 'react';
 import { browser } from '#imports';
 import { browserStorage } from '../lib/storage';
 import { performScan, getRootDomain } from '../lib/scanner-client';
 import defaultWordlist from '../lib/wordlists.json';
-import { ScanResult } from '../lib/types';
+import type { ScanResult } from '../lib/types';
 import { toast } from './use-toast';
 
 type HistoryItem = {
@@ -29,6 +30,7 @@ interface ScanHistoryState {
   deleteHistoryItem: (rootDomain: string) => void;
   addIgnoredDomain: (domain: string) => void;
   removeIgnoredDomain: (domain: string) => void;
+  _init: () => Promise<void>;
 }
 
 const useStore = create<ScanHistoryState>((set, get) => ({
@@ -38,58 +40,58 @@ const useStore = create<ScanHistoryState>((set, get) => ({
   isProcessingQueue: false,
   currentlyScanningDomain: null,
   ignoredDomains: [],
-  setHistory: (history) => set({ history }),
-  setIgnoredDomains: (ignoredDomains) => set({ ignoredDomains }),
+  
+  _init: async () => {
+    const [history, ignoredDomains] = await Promise.all([
+      browserStorage.get<HistoryItem[]>('scan-history'),
+      browserStorage.get<string[]>('ignored-domains'),
+    ]);
+    if (history) set({ history });
+    if (ignoredDomains) set({ ignoredDomains });
+  },
+
+  setHistory: (history) => {
+    set({ history });
+    browserStorage.set('scan-history', history);
+  },
+  setIgnoredDomains: (ignoredDomains) => {
+    set({ ignoredDomains });
+    browserStorage.set('ignored-domains', ignoredDomains);
+  },
+
   addScanToQueue: (domain) => {
     const rootDomain = getRootDomain(domain);
     if (!rootDomain) return;
 
     set((state) => {
-      // Check if domain is already being processed or in queue
-      if (
-        state.currentlyScanningDomain === rootDomain ||
-        state.scanQueue.includes(rootDomain) ||
-        state.sessionDomains.includes(rootDomain)
-      ) {
-        return state;
+      const isAlreadyQueued = state.scanQueue.includes(rootDomain);
+      const isCurrentlyScanning = state.currentlyScanningDomain === rootDomain;
+      const wasScannedInSession = state.sessionDomains.includes(rootDomain);
+
+      if (isAlreadyQueued || isCurrentlyScanning || wasScannedInSession) {
+        return {}; // No change
       }
-
-      // Add to queue and start processing if not already processing
-      const newQueue = [...state.scanQueue, rootDomain];
-      return { 
-        scanQueue: newQueue,
-        // If nothing is being processed, start with this domain
-        currentlyScanningDomain: state.currentlyScanningDomain || (newQueue.length === 1 ? rootDomain : null)
-      };
+      
+      console.log(`[zustand] Adding ${rootDomain} to scan queue.`);
+      return { scanQueue: [...state.scanQueue, rootDomain] };
     });
-
-    // Automatically start processing if not already processing
-    const state = get();
-    if (!state.isProcessingQueue) {
-      get().processQueue();
-    }
   },
-  addScanResults: async (results) => {
-    if (!results || results.length === 0) return;
 
+  addScanResults: (results) => {
+    if (!results || results.length === 0) return;
     const rootDomain = getRootDomain(results[0].domain);
-    const now = new Date().toISOString();
-    const newHistoryItem = {
+    if (!rootDomain) return;
+
+    const newHistoryItem: HistoryItem = {
       result: results,
-      scannedAt: now,
-      rootDomain: rootDomain,
+      scannedAt: new Date().toISOString(),
+      rootDomain,
     };
 
     set((state) => {
-      const newHistory = [
-        ...state.history.filter((h) => h.rootDomain !== rootDomain),
-        newHistoryItem,
-      ];
-      const newSessionDomains = Array.from(
-        new Set([...state.sessionDomains, rootDomain])
-      );
-
-      // Persist to storage
+      const newHistory = [newHistoryItem, ...state.history.filter((h) => h.rootDomain !== rootDomain)];
+      const newSessionDomains = Array.from(new Set([...state.sessionDomains, rootDomain]));
+      
       browserStorage.set('scan-history', newHistory);
       
       return {
@@ -98,24 +100,25 @@ const useStore = create<ScanHistoryState>((set, get) => ({
       };
     });
   },
+
   processQueue: async () => {
     const state = get();
     if (state.isProcessingQueue || state.scanQueue.length === 0) {
       return;
     }
 
-    set({ isProcessingQueue: true });
     const domainToScan = state.scanQueue[0];
-    set({ currentlyScanningDomain: domainToScan });
+    set({ isProcessingQueue: true, currentlyScanningDomain: domainToScan });
+    console.log(`[zustand] Processing queue for: ${domainToScan}`);
 
     try {
       const apiKey = await browserStorage.get<string>('viewdns-key');
-      const wordlistData = await browserStorage.get<typeof defaultWordlist>('wordlist');
+      const wordlistData = await browserStorage.get<typeof defaultWordlist>('wordlist') || defaultWordlist;
       
       const scanOutput = await performScan({
         domain: domainToScan,
         apiKey: apiKey || '',
-        wordlist: wordlistData || defaultWordlist,
+        wordlist: wordlistData,
       });
 
       if (scanOutput?.results?.length > 0) {
@@ -124,125 +127,96 @@ const useStore = create<ScanHistoryState>((set, get) => ({
           title: 'Scan Complete',
           description: `Found ${scanOutput.results.length} results for ${domainToScan}`,
         });
+      } else {
+        toast({
+          title: 'Scan Complete',
+          description: `No vulnerabilities found for ${domainToScan}.`,
+        });
       }
     } catch (error: any) {
+      console.error(`[zustand] Scan failed for ${domainToScan}:`, error);
       toast({
         variant: 'destructive',
         title: 'Scan Failed',
         description: error.message || `Could not scan ${domainToScan}`,
       });
     } finally {
-      set((state) => ({
+      console.log(`[zustand] Finished processing: ${domainToScan}`);
+      set((prevState) => ({
+        isProcessingQueue: false,
+        currentlyScanningDomain: null,
+        scanQueue: prevState.scanQueue.slice(1),
+        sessionDomains: Array.from(new Set([...prevState.sessionDomains, domainToScan]))
+      }));
+    }
+  },
+
+  skipCurrentScan: () => {
+    set((state) => {
+      if (!state.currentlyScanningDomain) return {};
+      toast({
+        title: 'Scan Skipped',
+        description: `Skipped scanning for ${state.currentlyScanningDomain}.`,
+      });
+      return {
         isProcessingQueue: false,
         currentlyScanningDomain: null,
         scanQueue: state.scanQueue.slice(1),
-      }));
-
-      // Process next in queue if any
-      const updatedState = get();
-      if (updatedState.scanQueue.length > 0) {
-        setTimeout(() => get().processQueue(), 1000); // Small delay between scans
-      }
-    }
-  },
-  skipCurrentScan: () => {
-    const state = get();
-    if (!state.isProcessingQueue || !state.currentlyScanningDomain) return;
-
-    const skippedDomain = state.currentlyScanningDomain;
-
-    toast({
-      title: 'Scan Skipped',
-      description: `Skipped scanning for ${skippedDomain}.`,
-    });
-
-    set({
-      isProcessingQueue: false,
-      currentlyScanningDomain: null,
-      scanQueue: state.scanQueue.slice(1),
+      };
     });
   },
+
   clearSession: () => set({ sessionDomains: [] }),
+
   deleteHistoryItem: (rootDomain) => {
-    set((state) => ({
-      history: state.history.filter((h) => h.rootDomain !== rootDomain),
-      sessionDomains: state.sessionDomains.filter((d) => d !== rootDomain),
-    }));
+    set((state) => {
+      const newHistory = state.history.filter((h) => h.rootDomain !== rootDomain);
+      const newSessionDomains = state.sessionDomains.filter((d) => d !== rootDomain);
+      browserStorage.set('scan-history', newHistory);
+      return {
+        history: newHistory,
+        sessionDomains: newSessionDomains,
+      };
+    });
   },
+
   addIgnoredDomain: (domain) => {
-    set((state) => ({
-      ignoredDomains: Array.from(new Set([...state.ignoredDomains, domain])),
-    }));
+    set((state) => {
+      const newIgnored = Array.from(new Set([...state.ignoredDomains, domain]));
+      browserStorage.set('ignored-domains', newIgnored);
+      return { ignoredDomains: newIgnored };
+    });
   },
+
   removeIgnoredDomain: (domain) => {
-    set((state) => ({
-      ignoredDomains: state.ignoredDomains.filter((d) => d !== domain),
-    }));
+    set((state) => {
+      const newIgnored = state.ignoredDomains.filter((d) => d !== domain);
+      browserStorage.set('ignored-domains', newIgnored);
+      return { ignoredDomains: newIgnored };
+    });
   },
 }));
+
+// A flag to ensure initialization happens only once
+let isInitialized = false;
 
 export function useScanHistory() {
   const state = useStore();
 
-  // Auto-process queue when items are added
   useEffect(() => {
+    if (!isInitialized) {
+      console.log('[useScanHistory] Initializing state from storage...');
+      state._init();
+      isInitialized = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    // This effect runs whenever the queue changes or processing stops
     if (state.scanQueue.length > 0 && !state.isProcessingQueue) {
       state.processQueue();
     }
-  }, [state.scanQueue.length, state.isProcessingQueue]);
-
-  // Listen for background scan triggers
-  useEffect(() => {
-    const messageListener = (message: any) => {
-      if (message.type === 'TRIGGER_SCAN') {
-        useStore.getState().addScanToQueue(message.domain);
-      }
-    };
-
-    browser.runtime.onMessage.addListener(messageListener);
-    return () => browser.runtime.onMessage.removeListener(messageListener);
-  }, []);
-
-  // Auto-scan current tab
-  useEffect(() => {
-    async function autoScanCurrentTab() {
-      try {
-        const isAutoScanEnabled = await browserStorage.get<boolean>('auto-scan-enabled');
-        if (!isAutoScanEnabled) return;
-
-        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-        const tab = tabs[0];
-        
-        if (tab?.url) {
-          const rootDomain = getRootDomain(tab.url);
-          if (rootDomain) {
-            useStore.getState().addScanToQueue(rootDomain);
-          }
-        }
-      } catch (error) {
-        console.error('Error during auto scan:', error);
-      }
-    }
-    autoScanCurrentTab();
-  }, []);
-
-  // Load persisted state
-  useEffect(() => {
-    async function loadPersistedState() {
-      try {
-        const [history, ignoredDomains] = await Promise.all([
-          browserStorage.get<typeof state.history>('scan-history'),
-          browserStorage.get<string[]>('ignored-domains')
-        ]);
-
-        if (history) useStore.getState().setHistory(history);
-        if (ignoredDomains) useStore.getState().setIgnoredDomains(ignoredDomains);
-      } catch (error) {
-        console.error('Error loading persisted state:', error);
-      }
-    }
-    loadPersistedState();
-  }, []);
+  }, [state.scanQueue, state.isProcessingQueue]);
 
   return {
     ...state,

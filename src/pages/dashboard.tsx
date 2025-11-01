@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   Card,
   CardContent,
@@ -31,7 +31,7 @@ import {
   ShieldX,
 } from "lucide-react";
 
-const statusConfig: any = {
+const statusConfig: Record<ScanResult['status'], { icon: React.ElementType; variant: 'destructive' | 'secondary' | 'default' | 'outline'; label: string }> = {
   Vulnerable: {
     icon: ShieldAlert,
     variant: "destructive",
@@ -81,7 +81,7 @@ function FindingDetails({
       <div className="flex justify-between items-start gap-2">
         <p className="font-semibold text-sm flex-grow">
           {finding.type} at{" "}
-          <code className="font-code bg-muted px-1 py-0.5 rounded break-all">
+          <code className="font-mono bg-muted px-1 py-0.5 rounded break-all">
             {finding.path}
           </code>
           <Button
@@ -122,17 +122,6 @@ function ResultRow({ result }: { result: ScanResult }) {
               >
                 {result.domain}
               </a>
-              {result.ip && (
-                <a
-                  href={`https://${result.ip}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-muted-foreground hover:text-primary"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
-              )}
             </div>
             <div className="flex items-center gap-4">
               <Badge variant={status.variant} className="gap-1.5 text-xs">
@@ -179,24 +168,14 @@ function DashboardPage() {
     isProcessingQueue,
     currentlyScanningDomain,
     skipCurrentScan,
-    processQueue, // Make sure this is included in the destructuring
   } = useScanHistory();
 
-  const handleManualScan = async () => {
+  const handleManualScan = () => {
     if (!inputValue) return;
     const domain = inputValue.trim();
     addScanToQueue(domain);
     setInputValue("");
-    // Explicitly start processing the queue
-    processQueue();
   };
-
-  // Add effect to auto-process queue when items are added
-  useEffect(() => {
-    if (!isProcessingQueue && sessionResults.length === 0) {
-      processQueue();
-    }
-  }, [isProcessingQueue, sessionResults.length]);
 
   const groupedResults = sessionResults.reduce((acc, result) => {
     const rootDomain = getRootDomain(result.domain);
@@ -221,7 +200,7 @@ function DashboardPage() {
           onClick={handleManualScan}
           disabled={!inputValue || isProcessingQueue}
         >
-          {isProcessingQueue ? (
+          {isProcessingQueue && !currentlyScanningDomain ? (
             <Loader className="mr-2 h-4 w-4 animate-spin" />
           ) : (
             <ScanLine className="mr-2 h-4 w-4" />
@@ -256,7 +235,7 @@ function DashboardPage() {
         </Alert>
       )}
 
-      <Card>
+      <Card className="flex-1">
         <CardHeader>
           <CardTitle className="text-xl">Scan Results</CardTitle>
         </CardHeader>
@@ -290,10 +269,16 @@ function DashboardPage() {
             </div>
           ) : (
             <div className="text-center text-muted-foreground p-8 border-t">
-              <p>No domains scanned in this session yet.</p>
-              <p className="text-sm">
-                Enter a domain above to start a new scan.
-              </p>
+              {isProcessingQueue ? (
+                <p>Waiting for scan results...</p>
+              ) : (
+                <>
+                  <p>No domains scanned in this session yet.</p>
+                  <p className="text-sm">
+                    Enter a domain above or browse to a new tab to start a scan.
+                  </p>
+                </>
+              )}
             </div>
           )}
         </CardContent>

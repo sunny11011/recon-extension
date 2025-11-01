@@ -1,133 +1,128 @@
-import { defineBackground } from '#imports';
+import { defineBackground, browser } from '#imports';
 import { browserStorage } from '../lib/storage';
 import { getRootDomain } from '../lib/scanner-client';
-import axios from 'axios';
 
-const PROXY_CONFIG = {
-  host: 'p.webshare.io',
-  port: 80,
-  auth: {
-    username: "zjriifuo-rotate", // Replace with env or config
-    password: "uqj15dchpk6h"  // Replace with env or config
-  }
-};
-
-const STEALTH_HEADERS_HTML = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+const STEALTH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9',
   'Accept-Encoding': 'gzip, deflate, br',
-  'Connection': 'keep-alive',
-  'Upgrade-Insecure-Requests': '1',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'none',
-  'Sec-Fetch-User': '?1',
-  'Cache-Control': 'no-cache'
-};
-
-const STEALTH_HEADERS_JSON = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Connection': 'keep-alive',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'cross-site',
-  'Cache-Control': 'no-cache'
 };
 
 export default defineBackground(() => {
   let pendingScan: string | null = null;
 
-  // Handle all HTTP requests through background script
+  // Primary message listener
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    handleMessage(message, sender).then(sendResponse).catch(error => {
-      console.error('Background script error:', error);
-      sendResponse({ success: false, error: error.message || 'Request failed' });
-    });
-    return true; // Keep channel open for async response
+    handleMessage(message, sender)
+      .then(sendResponse)
+      .catch((error) => {
+        console.error('[background] Error handling message:', message.type, error);
+        sendResponse({ success: false, error: error.message || 'An unknown error occurred' });
+      });
+    return true; // Indicates we will respond asynchronously
   });
 
-  // Separate async message handler
   async function handleMessage(message: any, sender: any) {
-    try {
-      switch (message.type) {
-        case 'CHECK_URL':
-          const response = await axios.get(message.url, {
-            proxy: PROXY_CONFIG,
-            headers: STEALTH_HEADERS_HTML,
-            timeout: 8000,
-            validateStatus: (status) => status < 500
-          });
-          
-          return {
-            success: true,
-            status: response.status,
-            data: response.data,
-            headers: response.headers
-          };
+    console.log('[background] Received message:', message.type);
+    switch (message.type) {
+      case 'CHECK_URL':
+        return await checkUrl(message.url);
+      
+      case 'FETCH_SUBDOMAINS':
+        return await fetchSubdomains(message.domain, message.apiKey);
 
-        case 'FETCH_SUBDOMAINS':
-          const { domain, apiKey } = message;
-          const url = `https://api.viewdns.info/subdomains/?domain=${domain}&apikey=${apiKey}&output=json`;
-          
-          const subdomainResponse = await axios.get(url, {
-            proxy: PROXY_CONFIG,
-            headers: STEALTH_HEADERS_JSON,
-            validateStatus: (status) => status < 500
-          });
+      case 'TRIGGER_SCAN':
+        return await triggerScan(message.url);
 
-          return {
-            success: true,
-            data: subdomainResponse.data
-          };
-
-        case 'TRIGGER_SCAN':
-          const isAutoScanEnabled = await browserStorage.get<boolean>('auto-scan-enabled');
-          const rootDomain = getRootDomain(message.url);
-          
-          if (isAutoScanEnabled && rootDomain) {
-            const ignoredDomains = await browserStorage.get<string[]>('ignored-domains') || [];
-            if (!ignoredDomains.includes(rootDomain)) {
-              pendingScan = rootDomain;
-              return { success: true, pending: true };
-            }
-          }
-          return { success: true, pending: false };
-
-        case 'GET_PENDING_SCAN':
-          if (pendingScan) {
-            const domain = pendingScan;
-            pendingScan = null;
-            return { success: true, domain };
-          }
-          return { success: true, domain: null };
-
-        default:
-          throw new Error(`Unknown message type: ${message.type}`);
-      }
-    } catch (error: any) {
-      throw new Error(error.message || 'Request failed');
+      case 'GET_PENDING_SCAN':
+        if (pendingScan) {
+          const domain = pendingScan;
+          pendingScan = null; // Clear after retrieving
+          console.log('[background] Delivering pending scan for:', domain);
+          return { success: true, domain };
+        }
+        return { success: true, domain: null };
+      
+      default:
+        console.warn('[background] Unknown message type:', message.type);
+        return { success: false, error: `Unknown message type: ${message.type}` };
     }
   }
 
-  // Auto-scan listener with retry logic
+  // Auto-scan logic on tab updates
   browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && tab.url) {
+    if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
+      console.log('[background] Tab updated:', tab.url);
       try {
-        await browser.runtime.sendMessage({
-          type: 'TRIGGER_SCAN',
-          url: tab.url
-        });
-      } catch (error) {
-        // Store the pending scan instead of immediately retrying
-        const rootDomain = getRootDomain(tab.url);
-        if (rootDomain) {
-          pendingScan = rootDomain;
+        const response = await triggerScan(tab.url);
+        if (response.success && response.pending) {
+          console.log('[background] Scan triggered for tab, pending for popup.');
         }
+      } catch (error) {
+        console.error('[background] Error triggering auto-scan:', error);
       }
     }
   });
+
+  // --- Helper Functions ---
+
+  async function checkUrl(url: string) {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: STEALTH_HEADERS,
+        redirect: 'manual', // We need to inspect redirects ourselves
+      });
+
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+
+      return {
+        success: true,
+        status: response.status,
+        headers: responseHeaders,
+        data: await response.text().catch(() => ''), // Read body, ignore errors for empty/binary
+      };
+    } catch (error: any) {
+      console.error(`[background] checkUrl failed for ${url}:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+  
+  async function fetchSubdomains(domain: string, apiKey: string) {
+    if (!apiKey) {
+      return { success: true, data: { response: { domains: [] } } };
+    }
+    const url = `https://api.viewdns.info/subdomains/?domain=${domain}&apikey=${apiKey}&output=json`;
+    try {
+      const response = await fetch(url, { headers: STEALTH_HEADERS });
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+      }
+      const data = await response.json();
+      return { success: true, data };
+    } catch (error: any) {
+      console.error(`[background] fetchSubdomains failed for ${domain}:`, error);
+      // Don't block the whole scan if this fails, just return no subdomains
+      return { success: false, error: `Failed to fetch subdomains: ${error.message}` };
+    }
+  }
+  
+  async function triggerScan(url: string) {
+    const isAutoScanEnabled = await browserStorage.get<boolean>('auto-scan-enabled');
+    const rootDomain = getRootDomain(url);
+    
+    if (isAutoScanEnabled && rootDomain) {
+      const ignoredDomains = await browserStorage.get<string[]>('ignored-domains') || [];
+      if (!ignoredDomains.includes(rootDomain)) {
+        pendingScan = rootDomain;
+        console.log(`[background] Pending scan set for: ${rootDomain}`);
+        return { success: true, pending: true };
+      }
+    }
+    return { success: true, pending: false };
+  }
 });

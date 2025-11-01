@@ -13,23 +13,27 @@ function App() {
   const [activeView, setActiveView] = useState("Dashboard");
   const { addScanToQueue } = useScanHistory();
 
-  // Check for pending scans when popup opens
+  // On popup open, check if the background script has a pending scan for us
   useEffect(() => {
     const checkPendingScan = async () => {
       try {
+        console.log('[App] Checking for pending scan...');
         const response = await browser.runtime.sendMessage({
           type: "GET_PENDING_SCAN",
         });
         if (response.success && response.domain) {
+          console.log(`[App] Found pending scan for ${response.domain}, adding to queue.`);
           addScanToQueue(response.domain);
+        } else {
+          console.log('[App] No pending scan found.');
         }
       } catch (error) {
-        console.error("Error checking pending scan:", error);
+        console.error("[App] Error checking for pending scan:", error);
       }
     };
 
     checkPendingScan();
-  }, []);
+  }, [addScanToQueue]); // Dependency ensures this runs with the latest hook function
 
   const renderView = () => {
     switch (activeView) {
@@ -47,7 +51,7 @@ function App() {
   };
 
   return (
-    <div className="flex flex-col h-[600px] w-[500px] bg-background">
+    <div className="flex flex-col h-[600px] w-[500px] bg-background text-foreground">
       <Header activeView={activeView} setActiveView={setActiveView} />
       <main className="flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 overflow-y-auto">{renderView()}</div>

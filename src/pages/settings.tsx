@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Button } from "../components/ui/button";
 import {
   Card,
@@ -29,9 +29,9 @@ function SettingsPage() {
   const [viewdnsApiKey, setViewdnsApiKey] = useState("");
   const [wordlist, setWordlist] = useState("");
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const { toast } = useToast();
-  const { ignoredDomains, addIgnoredDomain, removeIgnoredDomain } =
-    useScanHistory();
+  const { ignoredDomains, addIgnoredDomain, removeIgnoredDomain } = useScanHistory();
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -39,13 +39,13 @@ function SettingsPage() {
         const [apiKey, autoScan, savedWordlist] = await Promise.all([
           browserStorage.get<string>("viewdns-key"),
           browserStorage.get<boolean>("auto-scan-enabled"),
-          browserStorage.get<string>("wordlist"),
+          browserStorage.get<any>("wordlist"),
         ]);
 
         setViewdnsApiKey(apiKey || "");
         setAutoScanEnabled(autoScan || false);
         setWordlist(
-          savedWordlist || JSON.stringify(defaultWordlistData, null, 2)
+          savedWordlist ? JSON.stringify(savedWordlist, null, 2) : JSON.stringify(defaultWordlistData, null, 2)
         );
       } catch (error) {
         console.error("Error loading settings:", error);
@@ -54,10 +54,12 @@ function SettingsPage() {
           title: "Error",
           description: "Failed to load settings",
         });
+      } finally {
+        setIsLoading(false);
       }
     };
     loadSettings();
-  }, []);
+  }, [toast]);
 
   const handleAutoScanChange = async (checked: boolean) => {
     try {
@@ -93,14 +95,14 @@ function SettingsPage() {
     }
   };
 
-  const handleSaveWordlist = () => {
+  const handleSaveWordlist = async () => {
     try {
       const parsed = JSON.parse(wordlist);
-      storage.setItem("local:wordlist", JSON.stringify(parsed, null, 2));
+      await browserStorage.set("wordlist", parsed);
       toast({
         title: "Wordlist Saved",
         description:
-          "Your custom wordlist has been saved to local extension storage.",
+          "Your custom wordlist has been saved to extension storage.",
       });
     } catch (e) {
       toast({
@@ -110,6 +112,24 @@ function SettingsPage() {
       });
     }
   };
+  
+  const handleRestoreDefaultWordlist = async () => {
+    try {
+      await browserStorage.set("wordlist", defaultWordlistData);
+      setWordlist(JSON.stringify(defaultWordlistData, null, 2));
+      toast({
+        title: "Wordlist Restored",
+        description: "The default wordlist has been restored.",
+      });
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Could not restore the default wordlist.",
+      });
+    }
+  };
+
 
   const handleIgnoreCurrentDomain = async () => {
     try {
@@ -128,19 +148,13 @@ function SettingsPage() {
         }
       }
     } catch (error) {
-      const mockUrl = prompt("Enter a URL to ignore (e.g., example.com):");
-      if (mockUrl) {
-        const rootDomain = getRootDomain(mockUrl);
-        if (rootDomain) {
-          addIgnoredDomain(rootDomain);
-          toast({
-            title: "Domain Ignored",
-            description: `${rootDomain} has been added to the ignore list.`,
-          });
-        }
-      }
+      console.error('Failed to get current tab:', error)
     }
   };
+
+  if (isLoading) {
+    return <div className="p-4">Loading settings...</div>;
+  }
 
   return (
     <div className="flex flex-col h-full w-full p-4 space-y-4">
@@ -183,7 +197,7 @@ function SettingsPage() {
           <Button onClick={handleIgnoreCurrentDomain} className="w-full">
             Ignore Current Domain
           </Button>
-          <div className="space-y-2">
+          <div className="space-y-2 max-h-32 overflow-y-auto">
             {ignoredDomains.length > 0 ? (
               ignoredDomains.map((domain) => (
                 <div
@@ -247,11 +261,11 @@ function SettingsPage() {
       <Accordion type="single" collapsible className="w-full">
         <Card>
           <AccordionItem value="wordlists" className="border-b-0">
-            <AccordionTrigger className="p-6">
+            <AccordionTrigger className="p-6 w-full">
               <div className="flex flex-col space-y-1.5 text-left">
                 <CardTitle>Wordlists</CardTitle>
                 <CardDescription>
-                  Edit the JSON wordlists used for directory and file
+                  Edit the JSON wordlist used for directory and file
                   enumeration.
                 </CardDescription>
               </div>
@@ -261,10 +275,11 @@ function SettingsPage() {
                 <Textarea
                   value={wordlist}
                   onChange={(e) => setWordlist(e.target.value)}
-                  rows={20}
-                  className="font-code text-xs"
+                  rows={15}
+                  className="font-mono text-xs"
                 />
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
+                   <Button variant="outline" onClick={handleRestoreDefaultWordlist}>Restore Default</Button>
                   <Button onClick={handleSaveWordlist}>Save Wordlist</Button>
                 </div>
               </CardContent>
