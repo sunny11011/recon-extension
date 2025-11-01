@@ -69,28 +69,21 @@ export default defineBackground(() => {
       const response = await fetch(url, {
         method: 'GET',
         headers: STEALTH_HEADERS,
-        redirect: 'follow', // Follow redirects to get the final status
+        redirect: 'follow', // Fetch API follows redirects by default
         mode: 'cors'
       });
 
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
-      });
-      
-      const responseData = {
-        success: true,
-        status: response.status,
-        url: response.url, // Return the final URL after redirects
-        headers: responseHeaders,
-        data: await response.text().catch(() => ''), // Read body, ignore errors for empty/binary
+      // The response.url will be the final URL after all redirects.
+      return { 
+        success: true, 
+        status: response.status, 
+        finalUrl: response.url 
       };
-      
-      return responseData;
 
     } catch (error: any) {
       console.error(`[background] checkUrl failed for ${url}:`, error);
-      return { success: false, error: error.message };
+      // Don't throw, just return a failure object so the client can handle it
+      return { success: false, error: error.message, status: 0, finalUrl: url };
     }
   }
   
