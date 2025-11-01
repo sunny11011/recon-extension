@@ -29,6 +29,7 @@ import {
   Shield,
   ExternalLink,
   ShieldX,
+  SkipForward,
 } from "lucide-react";
 
 const statusConfig: Record<ScanResult['status'], { icon: React.ElementType; variant: 'destructive' | 'secondary' | 'default' | 'outline'; label: string }> = {
@@ -168,6 +169,7 @@ function DashboardPage() {
     isProcessingQueue,
     currentlyScanningDomain,
     skipCurrentScan,
+    stopAllScans,
     scanQueue,
     initialQueueLength,
   } = useScanHistory();
@@ -220,20 +222,30 @@ function DashboardPage() {
             <div>
               <AlertTitle>
                 Scanning in Progress 
-                {initialQueueLength > 0 && ` (${currentScanIndex} of ${initialQueueLength})`}
+                {initialQueueLength > 1 && ` (${currentScanIndex} of ${initialQueueLength})`}
               </AlertTitle>
               <AlertDescription>
                 Currently scanning:{" "}
                 <code className="font-semibold">{currentlyScanningDomain}</code>
               </AlertDescription>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
               <Loader className="h-4 w-4 animate-spin" />
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6"
+                className="h-7 w-7"
                 onClick={skipCurrentScan}
+                title="Skip Current Domain"
+              >
+                <SkipForward className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={stopAllScans}
+                title="Stop All Scans"
               >
                 <X className="h-4 w-4" />
               </Button>

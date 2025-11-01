@@ -23,7 +23,5 @@ export interface Wordlist {
         severity: string;
         type: string;
         description: string;
-        positive_match: string[];
-        false_positive_indicators: string[];
     }[];
 }

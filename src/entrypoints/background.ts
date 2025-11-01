@@ -9,9 +9,11 @@ const STEALTH_HEADERS = {
   'Accept-Encoding': 'gzip, deflate, br',
 };
 
+// Use an AbortController to allow scans to be cancelled
+const activeScans = new Map<string, AbortController>();
+
 export default defineBackground(() => {
   let pendingScan: string | null = null;
-  let cancelledScans = new Set<string>();
 
   // Primary message listener
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -26,16 +28,23 @@ export default defineBackground(() => {
 
   async function handleMessage(message: any, sender: any) {
     console.log('[background] Received message:', message.type);
-    
-    if (message.domain && cancelledScans.has(getRootDomain(message.domain))) {
-        console.log(`[background] Scan for ${message.domain} is cancelled. Ignoring message type: ${message.type}`);
-        return { success: false, error: 'Scan cancelled' };
+
+    const scanId = message.domain ? getRootDomain(message.domain) : null;
+    const controller = scanId ? activeScans.get(scanId) : null;
+
+    if (controller?.signal.aborted) {
+      console.log(`[background] Scan for ${scanId} was cancelled. Ignoring message type: ${message.type}`);
+      return { success: false, error: 'Scan cancelled' };
     }
 
     switch (message.type) {
       case 'CHECK_URL':
-        return await checkUrl(message.url);
-      
+        if (!scanId) return { success: false, error: 'No domain specified for CHECK_URL' };
+        if (!activeScans.has(scanId)) {
+           activeScans.set(scanId, new AbortController());
+        }
+        return await checkUrl(message.url, activeScans.get(scanId)!.signal);
+
       case 'FETCH_SUBDOMAINS':
         return await fetchSubdomains(message.domain, message.apiKey);
 
@@ -50,20 +59,25 @@ export default defineBackground(() => {
           return { success: true, domain };
         }
         return { success: true, domain: null };
-      
+
       case 'CANCEL_SCAN':
-        if (message.domain) {
-            console.log(`[background] Adding ${message.domain} to cancellation list.`);
-            cancelledScans.add(message.domain);
+        if (scanId && activeScans.has(scanId)) {
+          console.log(`[background] Cancelling scan for ${scanId}`);
+          activeScans.get(scanId)!.abort();
+          activeScans.delete(scanId);
         }
         return { success: true };
-      
-      case 'CLEAR_CANCELLED':
-         if (message.domain) {
-            console.log(`[background] Removing ${message.domain} from cancellation list.`);
-            cancelledScans.delete(message.domain);
-        }
-        return { success: true };
+
+      case 'START_SCAN_SESSION':
+         if (scanId) {
+            console.log(`[background] Starting new scan session for ${scanId}`);
+            // If a controller already exists, abort it before creating a new one
+            if (activeScans.has(scanId)) {
+              activeScans.get(scanId)!.abort();
+            }
+            activeScans.set(scanId, new AbortController());
+         }
+         return { success: true };
 
       default:
         console.warn('[background] Unknown message type:', message.type);
@@ -73,48 +87,46 @@ export default defineBackground(() => {
 
   // Auto-scan logic on tab updates
   browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-    // Trigger scan as soon as the URL is available and changes
     if (changeInfo.url && changeInfo.url.startsWith('http')) {
       console.log('[background] Tab URL changed:', changeInfo.url);
       try {
         await triggerScan(changeInfo.url);
-      } catch (error) => {
+      } catch (error) {
         console.error('[background] Error triggering auto-scan:', error);
       }
     }
   });
 
-  async function checkUrl(url: string) {
+  async function checkUrl(url: string, signal: AbortSignal) {
     try {
       const response = await fetch(url, {
         method: 'GET',
         headers: STEALTH_HEADERS,
         redirect: 'follow',
+        signal: signal,
       });
-      // Return the final status after redirects
       return { success: true, status: response.status };
     } catch (error: any) {
+      if (error.name === 'AbortError') {
+        console.log(`[background] Fetch aborted for ${url}`);
+        return { success: false, error: 'Scan cancelled', status: 0 };
+      }
       console.error(`[background] checkUrl failed for ${url}:`, error);
-      // Specifically check for timeout or connection errors
       if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
-        // This often corresponds to net::ERR_CONNECTION_TIMED_OUT or similar network issues
         return { success: false, error: 'Connection timed out or failed', status: 0 };
       }
       return { success: false, error: error.message, status: 0 };
     }
   }
-  
+
   async function fetchSubdomains(domain: string, apiKey: string) {
     if (!apiKey) {
-      // Return an empty success response if no API key is provided.
       return { success: true, data: { response: { domains: [] } } };
     }
     const url = `https://api.viewdns.info/subdomains/?domain=${domain}&apikey=${apiKey}&output=json`;
     try {
       const response = await fetch(url, { headers: STEALTH_HEADERS });
-      if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`API request failed with status ${response.status}`);
       const data = await response.json();
       return { success: true, data };
     } catch (error: any) {
@@ -122,29 +134,30 @@ export default defineBackground(() => {
       return { success: false, error: `Failed to fetch subdomains: ${error.message}` };
     }
   }
-  
+
   async function triggerScan(url: string) {
     const settings = await browserStorage.get<{ 'auto-scan-enabled'?: boolean }>('settings');
     const isAutoScanEnabled = settings?.['auto-scan-enabled'] ?? false;
     const rootDomain = getRootDomain(url);
-    
+
     if (isAutoScanEnabled && rootDomain) {
       const history = await browserStorage.get<any[]>('scan-history') || [];
       const ignoredDomains = await browserStorage.get<string[]>('ignored-domains') || [];
-      
+
       const alreadyScanned = history.some(item => item.rootDomain === rootDomain);
       const isIgnored = ignoredDomains.includes(rootDomain);
 
       if (!alreadyScanned && !isIgnored) {
-        pendingScan = rootDomain;
-        console.log(`[background] Pending scan set for: ${rootDomain}`);
-        
+        console.log(`[background] Auto-scan triggered for: ${rootDomain}`);
         try {
-            await browser.runtime.sendMessage({ type: 'ADD_TO_QUEUE', domain: rootDomain });
+          // This message is "fire and forget" - it tries to add to the queue if the popup is open.
+          // If not, the user will see it when they open the popup next.
+          await browser.runtime.sendMessage({ type: 'ADD_TO_QUEUE', domain: rootDomain });
         } catch (e) {
-            console.log("[background] Popup not open, scan will be added on next open.");
+          // This error is expected if the popup is not open.
+          console.log("[background] Popup not open, setting as pending scan.");
+          pendingScan = rootDomain;
         }
-
         return { success: true, pending: true };
       } else {
         console.log(`[background] Scan for ${rootDomain} skipped (ignored or already scanned).`);
